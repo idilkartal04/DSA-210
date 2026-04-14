@@ -1,0 +1,186 @@
+
+import os
+import warnings
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import f_oneway, pearsonr
+import statsmodels.formula.api as smf
+
+warnings.filterwarnings("ignore")
+
+#read the data
+df = pd.read_excel("wind.xlsx")
+
+#the hours and dates are different in the excel file, convert them into the proper types
+df["HourNum"] = df["Hour"].astype(str).str.replace("H", "", regex=False).astype(int)
+df["datetime"] = pd.to_datetime(df["Date"]) + pd.to_timedelta(df["HourNum"], unit="h")
+
+
+#group the times of day together for correlation analysis
+def get_time_group(hour):
+    if 0 <= hour < 6:
+        return "Night"
+    elif 6 <= hour < 12:
+        return "Morning"
+    elif 12 <= hour < 18:
+        return "Afternoon"
+    else:
+        return "Evening"
+
+df["TimeGroup"] = df["HourNum"].apply(get_time_group)
+
+os.makedirs("project_outputs", exist_ok=True)
+
+
+# Graphs
+# Histogram of MCP
+plt.figure(figsize=(8, 5))
+plt.hist(df["MCP (TL/MWh)"], bins=50)
+plt.xlabel("MCP (TL/MWh)")
+plt.ylabel("Frequency")
+plt.title("Histogram of MCP")
+plt.tight_layout()
+plt.savefig("project_outputs/histogram_mcp.png", dpi=300)
+plt.close()
+
+# Histogram of SMP
+plt.figure(figsize=(8, 5))
+plt.hist(df["SMP (TL/MWh)"], bins=50)
+plt.xlabel("SMP (TL/MWh)")
+plt.ylabel("Frequency")
+plt.title("Histogram of SMP")
+plt.tight_layout()
+plt.savefig("project_outputs/histogram_smp.png", dpi=300)
+plt.close()
+
+# 3) Sample of MCP vs SMP scatter plot (too many data points, the actual plot of the values resulted in a plot that was hard to read)
+sample_df = df.sample(n=min(5000, len(df)), random_state=42)
+plt.figure(figsize=(7, 6))
+plt.scatter(sample_df["MCP (TL/MWh)"], sample_df["SMP (TL/MWh)"], alpha=0.3)
+plt.xlabel("MCP (TL/MWh)")
+plt.ylabel("SMP (TL/MWh)")
+plt.title("MCP vs SMP")
+plt.tight_layout()
+plt.savefig("project_outputs/scatter_mcp_smp.png", dpi=300)
+plt.close()
+
+# 4) Average MCP by month
+monthly_mcp = df.groupby("Month")["MCP (TL/MWh)"].mean()
+plt.figure(figsize=(8, 5))
+plt.plot(monthly_mcp.index, monthly_mcp.values, marker="o")
+plt.xlabel("Month")
+plt.ylabel("Average MCP")
+plt.title("Average MCP by Month")
+plt.xticks(range(1, 13))
+plt.tight_layout()
+plt.savefig("project_outputs/monthly_mcp.png", dpi=300)
+plt.close()
+
+# Average SMP by month
+monthly_smp = df.groupby("Month")["SMP (TL/MWh)"].mean()
+plt.figure(figsize=(8, 5))
+plt.plot(monthly_smp.index, monthly_smp.values, marker="o")
+plt.xlabel("Month")
+plt.ylabel("Average SMP")
+plt.title("Average SMP by Month")
+plt.xticks(range(1, 13))
+plt.tight_layout()
+plt.savefig("project_outputs/monthly_smp.png", dpi=300)
+plt.close()
+
+# Average SMP by time group
+timegroup_smp = df.groupby("TimeGroup")["SMP (TL/MWh)"].mean().reindex(["Night", "Morning", "Afternoon", "Evening"])
+plt.figure(figsize=(8, 5))
+plt.bar(timegroup_smp.index, timegroup_smp.values)
+plt.xlabel("Time Group")
+plt.ylabel("Average SMP")
+plt.title("Average SMP by Time Group")
+plt.tight_layout()
+plt.savefig("project_outputs/timegroup_smp.png", dpi=300)
+plt.close()
+
+# Correlation by time group
+corr_by_group = df.groupby("TimeGroup").apply(
+    lambda x: x["MCP (TL/MWh)"].corr(x["SMP (TL/MWh)"])
+).reindex(["Night", "Morning", "Afternoon", "Evening"])
+
+plt.figure(figsize=(8, 5))
+plt.bar(corr_by_group.index, corr_by_group.values)
+plt.xlabel("Time Group")
+plt.ylabel("Correlation")
+plt.title("MCP-SMP Correlation by Time Group")
+plt.tight_layout()
+plt.savefig("project_outputs/correlation_by_timegroup.png", dpi=300)
+plt.close()
+
+
+# Hypothesis tests
+
+results = []
+
+# H1: Average MCP is the same across all months
+groups_mcp_month = [g["MCP (TL/MWh)"].values for _, g in df.groupby("Month")]
+stat1, p1 = f_oneway(*groups_mcp_month)
+results.append([
+    "H1: Average MCP is the same across all months",
+    "One-way ANOVA",
+    round(stat1, 4),
+    p1,
+    "Reject H0" if p1 < 0.05 else "Fail to reject H0"
+])
+
+# H2: MCP-SMP correlation is the same across all time groups
+interaction_model = smf.ols('Q("SMP (TL/MWh)") ~ Q("MCP (TL/MWh)") * C(TimeGroup)', data=df).fit()
+anova_interaction = smf.ols('Q("SMP (TL/MWh)") ~ Q("MCP (TL/MWh)") + C(TimeGroup)', data=df).fit()
+# Compare models to test interaction terms (This was recommended by AI)
+from statsmodels.stats.anova import anova_lm
+interaction_test = anova_lm(anova_interaction, interaction_model)
+stat2 = interaction_test.iloc[1]["F"]
+p2 = interaction_test.iloc[1]["Pr(>F)"]
+results.append([
+    "H2: MCP-SMP correlation is the same across all time groups",
+    "Interaction regression test",
+    round(stat2, 4),
+    p2,
+    "Reject H0" if p2 < 0.05 else "Fail to reject H0"
+])
+
+# H3: Average SMP is the same across all time groups
+groups_smp_time = [g["SMP (TL/MWh)"].values for _, g in df.groupby("TimeGroup")]
+stat3, p3 = f_oneway(*groups_smp_time)
+results.append([
+    "H3: Average SMP is the same across all time groups",
+    "One-way ANOVA",
+    round(stat3, 4),
+    p3,
+    "Reject H0" if p3 < 0.05 else "Fail to reject H0"
+])
+
+# H4: Average SMP is the same across all months
+groups_smp_month = [g["SMP (TL/MWh)"].values for _, g in df.groupby("Month")]
+stat4, p4 = f_oneway(*groups_smp_month)
+results.append([
+    "H4: Average SMP is the same across all months",
+    "One-way ANOVA",
+    round(stat4, 4),
+    p4,
+    "Reject H0" if p4 < 0.05 else "Fail to reject H0"
+])
+
+# Extra overall relationship test
+corr, p_corr = pearsonr(df["MCP (TL/MWh)"], df["SMP (TL/MWh)"])
+results.append([
+    "Extra: MCP and SMP are linearly related overall",
+    "Pearson correlation",
+    round(corr, 4),
+    p_corr,
+    "Reject H0" if p_corr < 0.05 else "Fail to reject H0"
+])
+
+results_df = pd.DataFrame(results, columns=["Hypothesis", "Test", "Statistic", "P-value", "Decision"])
+results_df["P-value"] = results_df["P-value"].apply(lambda x: f"{x:.4e}")
+results_df.to_csv("project_outputs/hypothesis_results.csv", index=False)
+
+print("\nHypothesis test results:\n")
+print(results_df.to_string(index=False))
+print("\nGraphs were saved in the 'project_outputs' folder.")
